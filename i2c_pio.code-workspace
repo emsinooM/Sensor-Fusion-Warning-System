@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../i2c_pio"
+		},
+		{
+			"name": "stm32_uart1_pio",
+			"path": "../stm32_uart1_pio"
+		},
+		{
+			"name": "small_proj_PIO",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
