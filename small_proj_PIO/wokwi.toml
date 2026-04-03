@@ -1,4 +1,0 @@
-[wokwi]
-version = 1
-firmware = '.pio\build\genericSTM32F103C6\firmware.elf' 
-elf = '.pio\build\genericSTM32F103C6\firmware.elf'
