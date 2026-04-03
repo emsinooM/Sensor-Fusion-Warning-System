@@ -58,6 +58,26 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint32_t previous_us_tick = 0;
+uint32_t distance;
+uint8_t sample_count = 0; // Đếm số lượng mẫu đã lấy
+
+void DWT_Init(void) {
+  // Kích hoạt DWT (Trace Enable) trong thanh ghi DEMCR của CoreDebug
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+
+  // Reset bộ đếm chu kỳ về 0
+  DWT->CYCCNT = 0;
+
+  // Bật bộ đếm (Cycle count enable) trong thanh ghi CTRL của DWT
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+void DWT_Delay_us(uint32_t us) {
+  uint32_t startTick = DWT->CYCCNT;
+  uint32_t delayTicks = us * (SystemCoreClock / 1000000);
+  while ((DWT->CYCCNT - startTick) < delayTicks);
+}
 
 /* USER CODE END 0 */
 
@@ -95,13 +115,100 @@ int main(void)
   MX_TIM3_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  DWT_Init();
+  HAL_TIM_Base_Start(&htim2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  uint32_t now = 0, last_change = 0;
+  uint32_t distance_list[5] = {0};
+  uint8_t index = 0;
+
   while (1)
   {
+    now = HAL_GetTick();
+
+    if (now - last_change >= 100) {
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_SET);
+      DWT_Delay_us(10);
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
+      
+      uint32_t timeout_start = HAL_GetTick();
+      uint8_t sensor_err = 0; // Cờ lưu trạng thái lỗi
+
+      // Đợi chân ECHO lên HIGH (Bắt đầu nhận sóng)
+      while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET){
+        if(HAL_GetTick() - timeout_start >= 50){
+          sensor_err = 1;
+          break;
+        }
+      } 
+      
+      if (sensor_err == 0) {
+        uint32_t start_time = __HAL_TIM_GET_COUNTER(&htim2);
+        timeout_start = HAL_GetTick();
+
+        // Đợi chân ECHO xuống LOW (Kết thúc nhận sóng)
+        while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET){
+          if(HAL_GetTick() - timeout_start >= 50){
+            sensor_err = 2;
+            break;
+          }
+        } 
+        
+        // CHÚ Ý CHỖ NÀY: Toàn bộ việc lưu array và lọc nhiễu phải nằm gọn trong if này
+        if(sensor_err == 0){
+          uint32_t end_time = __HAL_TIM_GET_COUNTER(&htim2); // Lưu thời điểm kết thúc
+          uint32_t duration = 0;
+          
+          if (end_time >= start_time) {
+              duration = end_time - start_time;
+          } else {
+              duration = (65535 - start_time) + end_time + 1; // Trường hợp timer 2 bị tràn
+          }
+          distance = duration / 58; // Tính khoảng cách, chia 58 theo datasheet
+
+          // Cập nhật mảng data
+          distance_list[index] = distance;
+          index = (index + 1) % 5;
+
+          if (sample_count < 5) {
+            sample_count++;
+          }
+
+          // Tính toán bộ lọc
+          if (sample_count == 5) {
+            uint32_t sum = 0;
+            uint32_t top = 0; 
+            uint32_t bot = distance_list[0];
+
+            for (int i = 0; i < 5; i++) {
+              sum += distance_list[i];
+              if (distance_list[i] > top) top = distance_list[i];
+              if (distance_list[i] < bot) bot = distance_list[i];
+            }
+            sum -= (top + bot);
+            uint32_t final_distance = sum / 3;
+
+            printf("Raw: %lu cm | Filtered: %lu cm\r\n", distance, final_distance);
+          } else {
+            printf("Raw: %lu cm | Loading filter...\r\n", distance);
+          }
+        } // <-- Đóng ngoặc của (sensor_err == 0) lần 2
+      } // <-- Đóng ngoặc của (sensor_err == 0) lần 1
+
+
+      // 4. Xử lý in ra cảnh báo nếu có lỗi xảy ra
+      if (sensor_err == 1) {
+          printf("Error: Timeout waiting for ECHO HIGH (Check wiring)\r\n");
+      } else if (sensor_err == 2) {
+          printf("Error: Timeout waiting for ECHO LOW (Out of range or bad sensor)\r\n");
+      }
+      
+      last_change = now; // Di chuyển last_change vào TRONG khối if
+    }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -149,7 +256,14 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+int _write(int fd, char* ptr, int len){
+  HAL_StatusTypeDef hstatus;
+  if(fd == 1 || fd == 2){
+    hstatus = HAL_UART_Transmit(&huart1, (uint8_t*)ptr, len, HAL_MAX_DELAY);
+    if (hstatus == HAL_OK) return len;
+  }
+  return -1;
+}
 /* USER CODE END 4 */
 
 /**
@@ -166,10 +280,10 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
+#ifdef  USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
+  * where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
   * @retval None
