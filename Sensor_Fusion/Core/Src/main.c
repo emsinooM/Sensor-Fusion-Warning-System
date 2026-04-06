@@ -36,6 +36,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define VL53L0X_I2C_ADDRESS (0x29 << 1)
 
 /* USER CODE END PD */
 
@@ -58,6 +59,8 @@ uint32_t distance_list[5] = {0};
 uint32_t final_distance = 999;
 uint8_t is_beeping = 0; // 0 là tắt, 1 là mở
 uint32_t buzzer_last_toggle = 0;
+
+
 
 /* USER CODE END PV */
 
@@ -151,6 +154,41 @@ int main(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_SET);
   DWT_Delay_us(10);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
+
+  printf("--- BAT DAU TEST DO KHOANG CACH VL53L0X ---\r\n");
+
+  uint8_t start_cmd = 0x01; // Lệnh 0x01 (Single-shot)
+  uint8_t status = 0;
+  uint8_t dist_data[2] = {0, 0};
+  uint16_t tof_distance_mm = 0;
+
+  // 1. Gửi lệnh yêu cầu bắn laser vào thanh ghi SYSRANGE_START (0x00)
+  HAL_I2C_Mem_Write(&hi2c1, VL53L0X_I2C_ADDRESS, 0x00, 1, &start_cmd, 1, 100);
+  printf("-> Da ra lenh ban Laser...\r\n");
+
+  // 2. Vòng lặp chờ cảm biến đo xong
+  uint32_t timeout_tick = HAL_GetTick();
+  while((status & 0x01) == 0){
+    HAL_I2C_Mem_Read(&hi2c1, VL53L0X_I2C_ADDRESS, 0x14, 1, &status, 1, 100);
+    if(HAL_GetTick() - timeout_tick > 1000){
+      printf("-> Timed out!\r\n");
+      break;
+    }
+  }
+
+  // 3. Nếu đo thành công, đọc 2 byte kết quả
+  if (status & 0x01){
+    // Khoảng cách được lưu ở thanh ghi 0x1E (Byte cao) và 0x1F (Byte thấp)
+    HAL_I2C_Mem_Read(&hi2c1, VL53L0X_I2C_ADDRESS, 0x1E, 1, dist_data, 2, 100);
+
+    // Ghép 2 byte lại thành 1 số nguyên 16-bit
+    tof_distance_mm = (dist_data[0] << 8) | dist_data[1];
+    printf("-> Khoang cach: %d mm\r\n", tof_distance_mm);
+  }
+  printf("--------------------------------\r\n");
+  HAL_Delay(2000);
+
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
