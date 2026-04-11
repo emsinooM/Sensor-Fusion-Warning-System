@@ -28,6 +28,17 @@
 // PLL_period_ps = 1655; macro_period_vclks = 2304
 #define calcMacroPeriod(vcsel_period_pclks) ((((uint32_t)2304 * (vcsel_period_pclks) * 1655) + 500) / 1000)
 
+// --- ĐOẠN CODE CẦU NỐI (I2C BRIDGE) CHO STM32 HAL ---
+// Hàm này dịch lệnh i2c_write của tác giả sang HAL_I2C_Master_Transmit của STM32
+uint8_t i2c_write(uint8_t address, uint8_t *data, uint8_t count) {
+  HAL_StatusTypeDef status = HAL_I2C_Master_Transmit(&hi2c1, address, data, count, 1000);
+  return (status == HAL_OK)? 0 : 1;
+}
+// Hàm này dịch lệnh i2c_read của tác giả sang HAL_I2C_Master_Receive của STM32
+uint8_t i2c_read(uint8_t address, uint8_t *data, uint8_t count) {
+  HAL_StatusTypeDef status = HAL_I2C_Master_Receive(&hi2c1, address, data, count, 1000);
+  return (status == HAL_OK)? 0 : 1;
+}
 
 
 void VL53L0X_setAddress(struct VL53L0X* dev, uint8_t new_addr)

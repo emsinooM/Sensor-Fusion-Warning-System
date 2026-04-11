@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Chương trình Dung hợp dữ liệu Siêu âm và ToF (Sensor Fusion)
   ******************************************************************************
   * @attention
   *
@@ -22,11 +22,13 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "VL53L0X.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,7 +39,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define VL53L0X_I2C_ADDRESS (0x29 << 1)
-
+#define OUT_OF_RANGE 999
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,16 +51,30 @@
 
 /* USER CODE BEGIN PV */
 uint32_t previous_us_tick = 0;
-volatile uint32_t distance;
+
+// --- Biến Siêu âm ---
+volatile uint32_t distance_raw;
 volatile uint8_t data_ready = 0;
 uint32_t start_time = 0, end_time = 0;
 uint8_t is_first_captured = 0;
 uint8_t sample_count = 0; // Đếm số lượng mẫu đã lấy
 uint32_t distance_list[5] = {0};
+uint32_t sonic_final_cm = OUT_OF_RANGE;
 
-uint32_t final_distance = 999;
+// --- Biến ToF ---
+struct VL53L0X myToF;
+uint16_t tof_raw_distance = 0;
+
+// --- Biến Hệ Thống (Sau khi dung hợp) ---
+uint32_t system_distance_cm = OUT_OF_RANGE; // Khoảng cách cuối cùng được chốt
+
+// --- Biến Còi ---
 uint8_t is_beeping = 0; // 0 là tắt, 1 là mở
 uint32_t buzzer_last_toggle = 0;
+
+
+uint32_t final_distance = 999;
+
 
 
 
@@ -68,6 +84,7 @@ uint32_t buzzer_last_toggle = 0;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 void sonic_Sensor_Filter(void);
+uint32_t sensor_Fusion(uint32_t sonic_cm, uint32_t tof_mm);
 void buzzer_Beep(uint32_t now_Time);
 /* USER CODE END PFP */
 
@@ -101,9 +118,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
       end_time = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
       if(end_time > start_time)
-        distance = (end_time - start_time) / 58;
+        distance_raw = (end_time - start_time) / 58;
       else{
-        distance = ((65535 - start_time) + end_time) / 58;
+        distance_raw = ((65535 - start_time) + end_time) / 58;
       }
 
       data_ready = 1;
@@ -155,38 +172,57 @@ int main(void)
   DWT_Delay_us(10);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
 
+  myToF.address = VL53L0X_I2C_ADDRESS;
+  myToF.io_timeout = 500;
+
   printf("--- BAT DAU TEST DO KHOANG CACH VL53L0X ---\r\n");
 
-  uint8_t start_cmd = 0x01; // Lệnh 0x01 (Single-shot)
-  uint8_t status = 0;
-  uint8_t dist_data[2] = {0, 0};
-  uint16_t tof_distance_mm = 0;
+  // uint8_t start_cmd = 0x01; // Lệnh 0x01 (Single-shot)
+  // uint8_t status = 0;
+  // uint8_t dist_data[2] = {0, 0};
+  // uint16_t tof_distance_mm = 0;
 
-  // 1. Gửi lệnh yêu cầu bắn laser vào thanh ghi SYSRANGE_START (0x00)
-  HAL_I2C_Mem_Write(&hi2c1, VL53L0X_I2C_ADDRESS, 0x00, 1, &start_cmd, 1, 100);
-  printf("-> Da ra lenh ban Laser...\r\n");
-
-  // 2. Vòng lặp chờ cảm biến đo xong
-  uint32_t timeout_tick = HAL_GetTick();
-  while((status & 0x01) == 0){
-    HAL_I2C_Mem_Read(&hi2c1, VL53L0X_I2C_ADDRESS, 0x14, 1, &status, 1, 100);
-    if(HAL_GetTick() - timeout_tick > 1000){
-      printf("-> Timed out!\r\n");
-      break;
-    }
+  printf("Dang khoi tao vl53l0x...\r\n");
+  if(VL53L0X_init(&myToF)){
+    printf("Da khoi tao vl53l0x thanh cong...\r\n");
+    // Cấu hình thời gian đo 33ms (đảm bảo tốc độ nhanh để chạy realtime)
+    VL53L0X_setMeasurementTimingBudget(&myToF, 33000);
+  }
+  else{
+    printf("Khoi tao vl53l0x that bai...\r\n");
   }
 
-  // 3. Nếu đo thành công, đọc 2 byte kết quả
-  if (status & 0x01){
-    // Khoảng cách được lưu ở thanh ghi 0x1E (Byte cao) và 0x1F (Byte thấp)
-    HAL_I2C_Mem_Read(&hi2c1, VL53L0X_I2C_ADDRESS, 0x1E, 1, dist_data, 2, 100);
+  // Trigger mồi hệ thống siêu âm
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_SET);
+  DWT_Delay_us(10);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
+  
 
-    // Ghép 2 byte lại thành 1 số nguyên 16-bit
-    tof_distance_mm = (dist_data[0] << 8) | dist_data[1];
-    printf("-> Khoang cach: %d mm\r\n", tof_distance_mm);
-  }
-  printf("--------------------------------\r\n");
-  HAL_Delay(2000);
+  // // 1. Gửi lệnh yêu cầu bắn laser vào thanh ghi SYSRANGE_START (0x00)
+  // HAL_I2C_Mem_Write(&hi2c1, VL53L0X_I2C_ADDRESS, 0x00, 1, &start_cmd, 1, 100);
+  // printf("-> Da ra lenh ban Laser...\r\n");
+
+  // // 2. Vòng lặp chờ cảm biến đo xong
+  // uint32_t timeout_tick = HAL_GetTick();
+  // while((status & 0x01) == 0){
+  //   HAL_I2C_Mem_Read(&hi2c1, VL53L0X_I2C_ADDRESS, 0x14, 1, &status, 1, 100);
+  //   if(HAL_GetTick() - timeout_tick > 1000){
+  //     printf("-> Timed out!\r\n");
+  //     break;
+  //   }
+  // }
+
+  // // 3. Nếu đo thành công, đọc 2 byte kết quả
+  // if (status & 0x01){
+  //   // Khoảng cách được lưu ở thanh ghi 0x1E (Byte cao) và 0x1F (Byte thấp)
+  //   HAL_I2C_Mem_Read(&hi2c1, VL53L0X_I2C_ADDRESS, 0x1E, 1, dist_data, 2, 100);
+
+  //   // Ghép 2 byte lại thành 1 số nguyên 16-bit
+  //   tof_distance_mm = (dist_data[0] << 8) | dist_data[1];
+  //   printf("-> Khoang cach: %d mm\r\n", tof_distance_mm);
+  // }
+  // printf("--------------------------------\r\n");
+  // HAL_Delay(2000);
 
 
   /* USER CODE END 2 */
@@ -209,7 +245,7 @@ int main(void)
       if (data_ready == 1){
         data_ready = 0;
         // Cập nhật mảng data
-        distance_list[index] = distance;
+        distance_list[index] = distance_raw;
         index = (index + 1) % 5;
 
         sonic_Sensor_Filter();
@@ -219,13 +255,28 @@ int main(void)
         if(sample_count > 0){
           printf("Sensor Timeout / Disconnected!\r\n");
           sample_count = 0;
-          final_distance = 999;
+          sonic_final_cm = OUT_OF_RANGE;
         }
       }
+      tof_raw_distance = VL53L0X_readRangeSingleMillimeters(&myToF);
+
+      if(sample_count == 5){
+        system_distance_cm = sensor_Fusion(sonic_final_cm, tof_raw_distance);
+        // In log tổng hợp ra màn hình
+          printf("Sonic: %3lu cm | ToF: %3u cm | FINAL: %3lu cm\r\n", 
+                 sonic_final_cm, (tof_raw_distance/10), system_distance_cm);
+      }
+      else{
+        printf("Loading Filter...\r\n");
+      }
+
+      // printf("Sieu am: %lu cm | ToF: %u mm (~%u cm)\r\n", final_distance, tof_raw_distance, tof_raw_distance / 10);
+
       last_change = now;
       HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_SET);
       DWT_Delay_us(10);
       HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
+
     }
     // ========================================================
     // TASK 2: ĐIỀU KHIỂN CÒI BÁO (Chạy liên tục không bị nghẽn)
@@ -304,25 +355,58 @@ if (sample_count < 5) {
             if (distance_list[i] < bot) bot = distance_list[i];
           }
           sum -= (top + bot);
-          final_distance = sum / 3;
-
-          printf("Raw: %lu cm | Filtered: %lu cm\r\n", distance, final_distance);
-        } else {
-          printf("Raw: %lu cm | Loading filter...\r\n", distance);
+          sonic_final_cm = sum / 3;
         }
 }
 
+uint32_t sensor_Fusion(uint32_t sonic_cm, uint32_t tof_mm){
+  uint32_t tof_cm = tof_mm / 10;
+  uint32_t fusion_cm = OUT_OF_RANGE;
+
+  uint8_t sonic_valid = (sonic_cm > 0 && sonic_cm < 400);
+  uint8_t tof_valid = (tof_mm > 0 && tof_mm < 2000);
+
+  // TH1: Cả 2 đều bắt được vật thê
+  if(sonic_valid && tof_valid){
+    if (abs((uint32_t)sonic_cm) - abs((uint32_t)tof_cm) > 20){
+      // Nếu chênh lệch nhiều -> Gặp vật thể đặc biệt
+      // Ưu tiên khoảng cách nhỏ hơn
+      fusion_cm = (sonic_cm < tof_cm)? sonic_cm : tof_cm;
+      printf("[FUSION] Canh bao vat lieu dac biet! Chon: %lu cm\r\n", fusion_cm);
+    }
+    else{
+      // Nếu không chênh lệch nhiều, ưu tiên tof
+      fusion_cm = tof_cm;
+    }
+  }
+  // TH2: ToF chết/ ngoài tầm, Sonic sống (Vật ở xa hoặc ngoài nắng)
+  else if(sonic_valid && !tof_valid){
+    fusion_cm = sonic_cm;
+  }
+
+  //TH3: Sonic chết, ToF sống (Bề mặt hút âm thanh, vật nghiêng)
+  else if(!sonic_valid && tof_valid){
+    fusion_cm = tof_cm;
+  }
+
+  //TH4: 2 cái chết
+  else{
+    fusion_cm = OUT_OF_RANGE;
+  }
+  return fusion_cm;
+}
+
 void buzzer_Beep(uint32_t now_Time){
-if (sample_count < 5 || final_distance > 100) {
+if (sample_count < 5 || system_distance_cm > 100) {
       HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
       is_beeping = 0;
     }
-    else if (final_distance <= 30) {
+    else if (system_distance_cm <= 30) {
       HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
       is_beeping = 1;
     }
     else{
-      uint32_t beep_off_time = (final_distance * 5) + 50;
+      uint32_t beep_off_time = (system_distance_cm * 5) + 50;
       if(is_beeping == 1){
         // Nếu còi đang kêu, kiểm tra xem đã kêu đủ 50ms chưa để tắt
         if(now_Time - buzzer_last_toggle >= 50){
